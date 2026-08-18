@@ -1,3 +1,0 @@
-# Dev-only tooling — not needed to run the app itself.
--r requirements.txt
-reportlab>=4.2.0
