@@ -1,11 +1,3 @@
-"""Generates realistic synthetic PDFs (HR policy, product manual, onboarding guide, SOPs)
-for testing the SmartDoc RAG pipeline. All company/product names and data are fictional.
-
-Usage:
-    pip install reportlab
-    python scripts/generate_sample_docs.py
-"""
-
 from pathlib import Path
 
 from reportlab.lib import colors

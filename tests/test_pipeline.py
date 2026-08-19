@@ -1,5 +1,3 @@
-"""Unit tests that don't require a live OpenAI key — pure logic around chunking and retrieval gating."""
-
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 

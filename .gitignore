@@ -7,4 +7,5 @@ data/uploads/*
 !data/uploads/.gitkeep
 data/chroma_db/*
 !data/chroma_db/.gitkeep
+data/chat_history.db
 .DS_Store

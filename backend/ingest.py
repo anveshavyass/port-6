@@ -1,5 +1,3 @@
-"""Parses PDFs into clean text, chunks them, embeds the chunks, and persists them in Chroma."""
-
 import re
 from pathlib import Path
 
@@ -10,11 +8,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from backend import config
 
-# Some PDF generators (including the one used for this project's sample docs) draw a bulleted
-# list item's marker as a separate text element from its content, positioned to its left rather
-# than inline. pypdf extracts text in content-stream order, so the bullet glyph and its text come
-# out as two separate lines — "●\nTreat colleagues..." instead of "● Treat colleagues...". This
-# matches a line that is ONLY a bullet character and joins it with the line that follows.
 _BULLET_CHARS = "●•▪◦‣"
 _ORPHANED_BULLET_RE = re.compile(rf"^([{_BULLET_CHARS}])[ \t]*\n[ \t]*", re.MULTILINE)
 
@@ -33,15 +26,13 @@ def get_vectorstore() -> Chroma:
         collection_name=config.COLLECTION_NAME,
         embedding_function=get_embeddings(),
         persist_directory=str(config.CHROMA_DIR),
-        # Cosine distance keeps the similarity scale intuitive (0-1) for the relevance threshold.
         collection_metadata={"hnsw:space": "cosine"},
     )
 
 
 def ingest_pdf(pdf_path: Path) -> int:
-    """Load, chunk, embed, and persist one PDF. Returns the number of chunks added."""
     loader = PyPDFLoader(str(pdf_path))
-    pages = loader.load()  # one Document per page, with page_number in metadata
+    pages = loader.load() 
 
     for page in pages:
         page.page_content = _clean_extracted_text(page.page_content)
@@ -56,7 +47,6 @@ def ingest_pdf(pdf_path: Path) -> int:
     for i, chunk in enumerate(chunks):
         chunk.metadata["source_file"] = pdf_path.name
         chunk.metadata["chunk_index"] = i
-        # PyPDFLoader's page number is 0-indexed; store the human-readable version for citations.
         chunk.metadata["page"] = chunk.metadata.get("page", 0) + 1
 
     if not chunks:
@@ -73,6 +63,19 @@ def list_ingested_documents() -> list[str]:
     existing = vectorstore.get(include=["metadatas"])
     sources = {m["source_file"] for m in existing["metadatas"] if m.get("source_file")}
     return sorted(sources)
+
+
+def get_full_document_text(source_file: str) -> str:
+    """Reassembles one document's full text from its stored chunks, in original order.
+    Used for whole-document summarization, where similarity search over fragments doesn't
+    apply — there's no single "most relevant" chunk to retrieve for "summarize this"."""
+    vectorstore = get_vectorstore()
+    existing = vectorstore.get(where={"source_file": source_file}, include=["metadatas", "documents"])
+    pairs = sorted(
+        zip(existing["metadatas"], existing["documents"]),
+        key=lambda pair: pair[0].get("chunk_index", 0),
+    )
+    return "\n\n".join(text for _, text in pairs)
 
 
 def delete_document(filename: str) -> int:
