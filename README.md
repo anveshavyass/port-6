@@ -1,131 +1,159 @@
 # SmartDoc — Document Q&A Assistant
 
-A RAG (Retrieval-Augmented Generation) assistant that answers plain-English questions over a
-library of PDF documents, with source citations on every answer.
+**Turn a library of PDF documents into a grounded, cited Q&A assistant — ask in plain English, get answers sourced back to the exact file, page, and paragraph.**
 
-## How it works
+[![Backend](https://img.shields.io/badge/backend-FastAPI-009688)](backend)
+[![Frontend](https://img.shields.io/badge/frontend-Streamlit-FF4B4B)](app.py)
+[![Vector DB](https://img.shields.io/badge/vectors-ChromaDB-542CFF)](backend/ingest.py)
+[![History](https://img.shields.io/badge/history-SQLite-003B57)](backend/chat_history.py)
+[![LLM](https://img.shields.io/badge/LLM-GPT--4o--mini-412991)](backend/rag_chain.py)
+[![Tests](https://img.shields.io/badge/tests-pytest-0a9edc)](tests)
 
-```
-PDF upload → parse text (PyPDFLoader) → chunk (400 chars, 70 overlap) →
-embed (OpenAI text-embedding-3-small) → store in ChromaDB (persisted to disk)
+## Problem statement
 
-User question → embed question → similarity search (top 5 chunks) →
-if similarity too low: return "not covered" without calling the LLM →
-otherwise: GPT answers using ONLY the retrieved chunks → answer + citations
-  (only chunks close to the top match are cited — see "Why these choices" below)
-```
+Answering a question by hand-searching PDF policies, manuals, and SOPs is slow, and pasting a
+whole document into a chatbot invites the model to guess when the document doesn't actually cover
+the question. SmartDoc retrieves only the passages relevant to a question, forces the LLM to
+answer from those passages alone, and cites exactly where each answer came from — so a wrong
+answer is either grounded and traceable, or the system says so instead of guessing.
 
-## Why these choices
+## What it does
 
-- **ChromaDB over keyword search**: semantic embeddings match paraphrases and synonyms
-  ("termination clause" ↔ "how this agreement ends"), which substring/keyword search cannot.
-- **Chunk size 400 / overlap 70** *(started at 800/150, see below)*: small enough to keep each
-  chunk's embedding focused on roughly one section, large enough to hold a complete thought.
-  Overlap prevents losing meaning when a sentence is split across a chunk boundary.
-  **Why it changed from 800/150:** at 800 characters, `pypdf`'s text extraction doesn't reliably
-  preserve the blank-line breaks between a PDF's original sections, so the splitter's paragraph
-  separator rarely fired — it fell back to single newlines and kept packing text until it hit
-  800 characters regardless of topic, producing chunks that blended 3-4 unrelated sections
-  together. That hurt retrieval (a chunk's embedding is now a blur of multiple topics instead of
-  one) *and* citations (the "paragraph" shown to the user was actually several unrelated
-  paragraphs stitched together). Cutting the size to 400 keeps each chunk much closer to one
-  actual section.
-- **Relevance gate before the LLM call**: retrieved chunks below a similarity threshold are
-  treated as "not relevant enough" — the app returns "not covered by the documents" directly
-  instead of calling the LLM, which is the main defense against hallucinating on out-of-scope
-  questions.
-- **The LLM's own verdict decides citations, not just the similarity gate**: chunks from the same
-  document share enough vocabulary that even an unrelated section can clear the relevance gate
-  (e.g. "social media policy" scored 0.68 similarity against the *Anti-Harassment* section, not
-  just the *Social Media* section). So the LLM is instructed to emit an exact `NOT_COVERED` token
-  when the excerpts don't actually answer the question — checked before any chunk is cited — and
-  on top of that, only chunks within a small margin of the *best* match in that retrieval are
-  cited at all, not every chunk that was merely retrieved. This is the concrete answer to "where
-  is your system most likely to give a wrong answer": a topically-adjacent chunk in the same
-  document can outrank the truly relevant one if the question is phrased ambiguously.
+1. Ingests uploaded PDFs — chunks, embeds, and persists them to a vector store.
+2. Resolves follow-up questions into standalone ones using recent chat history.
+3. Retrieves the top-5 most similar chunks, scoped to one, several, or all documents.
+4. Gates on similarity — returns "not covered" without calling the LLM if nothing's relevant.
+5. Otherwise, GPT answers using only the retrieved excerpts, with an extractable supporting quote.
+6. Cites only chunks near the best match, not everything retrieved, to avoid wrong citations.
+7. Answers whole-document summary requests from the full text instead of retrieved chunks.
+8. Queries multiple selected documents independently and reports per-document.
+9. Persists every conversation to SQLite so it can be reopened or deleted later.
 
-## Setup
+## Tech stack
 
-1. `python -m venv .venv && source .venv/bin/activate`
-2. `pip install -r requirements.txt`
-3. `cp .env.example .env` and add your `OPENAI_API_KEY`
+| Layer | Choice | Why |
+|---|---|---|
+| Classification / answers / summaries | **OpenAI GPT-4o-mini** | Cheap, fast, good enough with strict prompt rules |
+| Embeddings | **OpenAI `text-embedding-3-small`** | Cheap, fast, same vendor as the chat model |
+| Vector store | **ChromaDB**, persisted to disk | Semantic search beats keyword search on paraphrases; no server needed at this scale |
+| Chat history | **SQLite**, no ORM | Two simple tables; nothing to abstract |
+| Backend | **FastAPI** | Async, typed, easy to test |
+| Frontend | **Streamlit** | Chat UI + file upload with no separate frontend build |
+| Secrets | `.env` (git-ignored) | No hardcoded keys anywhere in source |
 
-## Run
+## Core concepts
 
-Two processes, in separate terminals:
-
-```bash
-uvicorn backend.main:app --reload
-streamlit run app.py
-```
-
-Open the Streamlit URL it prints (usually `http://localhost:8501`), upload PDFs in the sidebar,
-then ask questions in the chat box. Each ingested document has a 🗑️ button next to it in the
-sidebar to remove it (and its chunks) from the vector store.
+- **Chunking** — each PDF page is split into ~400-character pieces with 70 characters of overlap,
+  breaking on paragraph/sentence boundaries where possible. Small chunks keep each embedding
+  focused on one idea; overlap stops a sentence from being cut in half at a chunk boundary.
+- **Embeddings** — every chunk (and every question) is converted to a vector via
+  `text-embedding-3-small`. Vectors that are close together represent similar meaning, even if the
+  wording differs.
+- **Retrieval** — a question's vector is compared against all stored chunk vectors by cosine
+  similarity; the top 5 closest chunks are pulled back as candidate context.
+- **Relevance gate** — if those top chunks aren't similar enough to the question, the app skips
+  the LLM entirely and says the topic isn't covered, instead of risking a made-up answer.
+- **Grounded answering** — the LLM sees only the retrieved chunks (never the whole document) and
+  must answer from them alone, replying with a fixed `NOT_COVERED` token if they don't actually
+  answer the question.
+- **Citation margin** — of the chunks sent to the LLM, only those within a small similarity margin
+  of the single best match are shown as sources, so a same-document-but-wrong-section chunk isn't
+  cited just because it was retrieved.
+- **Follow-up resolution** — before retrieval, a quick LLM pass rewrites context-dependent
+  questions (e.g. "what about after 5 years?") into a standalone question using recent chat turns.
 
 ## Sample documents
 
-`sample_docs/` contains 5 synthetic PDFs for a fictional company ("Clearwave Technologies") —
-two HR policies, a product manual, an onboarding guide, and an SOP — covering exactly the
-document types this mission targets. They're generated (not hand-written) so the facts inside
-are consistent and known in advance, which makes them good material for demoing citations and
-testing retrieval:
+- Source: 5 synthetic PDFs for a fictional company ("Clearwave Technologies"), generated (not
+  hand-written) so the facts inside are consistent and known in advance — good material for
+  demoing citations and testing retrieval.
+- Location: [`sample_docs/`](sample_docs) — two HR policies, a product manual, an onboarding
+  guide, and an SOP, covering exactly the document types this project targets.
+- Regenerate or edit them anytime: `pip install reportlab && python scripts/generate_sample_docs.py`
+- Also tested against 3 real internal documents — Calfus policies pulled from GreytHR — which
+  ingested cleanly and answered questions as expected, confirming the pipeline works beyond the
+  synthetic sample set.
+
+## Repo structure
 
 ```
-sample_docs/
-├── 01_HR_Time_Off_Leave_Policy.pdf
-├── 02_HR_Code_of_Conduct_Policy.pdf
-├── 03_Product_Manual_TicketDesk_Admin_Guide.pdf
-├── 04_New_Hire_Onboarding_Guide.pdf
-└── 05_SOP_IT_Helpdesk_Incident_Escalation.pdf
-```
-
-Upload these via the Streamlit sidebar to test the pipeline. Example questions to try:
-
-- "How many PTO days do I get after 3 years?" → *20 days* (`01_HR_Time_Off_Leave_Policy.pdf`)
-- "What's the response time for a Sev 1 incident?" → *15 minutes* (`05_SOP_IT_Helpdesk_Incident_Escalation.pdf`)
-- "What's the API rate limit for TicketDesk?" → *100 requests/min per key* (`03_Product_Manual...`)
-- "What's Clearwave's stock ticker symbol?" → **out of scope** — none of the documents cover this;
-  the app should say so rather than guessing (this is the hallucination check, M6S5).
-
-Regenerate or edit them anytime:
-
-```bash
-pip install reportlab
-python scripts/generate_sample_docs.py
-```
-
-## Tests
-
-```bash
-pytest tests/ -v
-```
-
-## Project structure
-
-```
-smartdoc/
-├── app.py                  # Streamlit UI
+Port_6/
+├── README.md
+├── requirements.txt
+├── app.py                        
 ├── scripts/
-│   └── generate_sample_docs.py  # regenerates the synthetic PDFs in sample_docs/
-├── sample_docs/             # 5 synthetic test PDFs (see above)
+│   └── generate_sample_docs.py   
+├── sample_docs/                  
 ├── backend/
-│   ├── config.py           # env vars, chunk size/overlap, relevance threshold
-│   ├── ingest.py            # PDF parsing, chunking, embedding, persistence, deletion
-│   ├── retrieve.py          # similarity search + relevance gate
-│   ├── rag_chain.py         # prompt construction + LLM call
-│   └── main.py               # FastAPI endpoints (/upload, /query, /documents, DELETE /documents/{filename})
+│   ├── main.py                   
+│   ├── config.py                
+│   ├── ingest.py                
+│   ├── retrieve.py              
+│   ├── rag_chain.py             
+│   └── chat_history.py           
 ├── data/
-│   ├── uploads/              # raw PDFs
-│   └── chroma_db/             # persisted vector store
+│   ├── uploads/                 
+│   ├── chroma_db/               
+│   └── chat_history.db           
 └── tests/
     └── test_pipeline.py
 ```
 
-## Known limitations
+## API reference
 
-- Scanned/image-only PDFs with no extractable text will fail ingestion (no OCR yet).
-- Non-English documents work only as well as the embedding model and GPT handle that language —
-  not specifically tuned for multilingual retrieval.
-- The relevance gate is similarity-based, not a full hallucination check — it prevents answering
-  from irrelevant context, but doesn't verify every factual claim in a generated answer.
+Base URL: `http://localhost:8000` (Streamlit frontend talks to it over plain HTTP).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness check; also reports whether `OPENAI_API_KEY` is configured |
+| `POST` | `/upload` | Upload and ingest a PDF (multipart, field `file`) |
+| `GET` | `/documents` | List ingested document filenames |
+| `DELETE` | `/documents/{filename}` | Remove a document and its vector store chunks |
+| `POST` | `/query` | Ask a question — `{"question", "documents": [], "history": []}` → answer + citations, or `{"per_document": [...]}` when scoped to multiple documents |
+
+## Interface
+
+One Streamlit app, two sidebar tabs:
+
+- **Documents** — upload PDFs, see what's ingested, remove a document (deletes both the file and
+  its vector store chunks).
+- **Chats** — start a new conversation, reopen a previous one, or delete it. Each is persisted to
+  SQLite independently of the document library.
+
+Above the chat box, a scope picker chooses whether a question is answered against all documents,
+one, or a chosen subset — multi-document scope answers each document independently rather than
+blending them into a single context.
+
+## Setup
+
+### Prerequisites
+
+- Python 3.9+
+- An `OPENAI_API_KEY`
+
+### 1. Backend
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cat > .env <<EOF
+OPENAI_API_KEY=sk-...
+EOF
+uvicorn backend.main:app --reload
+```
+
+### 2. Frontend
+
+```bash
+streamlit run app.py
+```
+
+Open the URL it prints (usually `http://localhost:8501`), upload PDFs in the sidebar, then ask
+questions in the chat box.
+
+## Testing & reliability
+
+```bash
+pytest tests/ -v
+```
+Run this command to test the system.

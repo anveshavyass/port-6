@@ -58,7 +58,6 @@ def ingest_pdf(pdf_path: Path) -> int:
 
 
 def list_ingested_documents() -> list[str]:
-    """Distinct source filenames currently stored in the vector DB."""
     vectorstore = get_vectorstore()
     existing = vectorstore.get(include=["metadatas"])
     sources = {m["source_file"] for m in existing["metadatas"] if m.get("source_file")}
@@ -66,9 +65,6 @@ def list_ingested_documents() -> list[str]:
 
 
 def get_full_document_text(source_file: str) -> str:
-    """Reassembles one document's full text from its stored chunks, in original order.
-    Used for whole-document summarization, where similarity search over fragments doesn't
-    apply — there's no single "most relevant" chunk to retrieve for "summarize this"."""
     vectorstore = get_vectorstore()
     existing = vectorstore.get(where={"source_file": source_file}, include=["metadatas", "documents"])
     pairs = sorted(
@@ -79,8 +75,6 @@ def get_full_document_text(source_file: str) -> str:
 
 
 def delete_document(filename: str) -> int:
-    """Removes every chunk for one source file from the vector store and deletes the uploaded
-    PDF from disk. Returns the number of chunks removed (0 if the filename wasn't found)."""
     filename = config.safe_filename(filename)
 
     vectorstore = get_vectorstore()
